@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Beea</string>
+    <string name="app_description">Beea listens for your wake word and responds instantly.</string>
+</resources>

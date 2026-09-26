@@ -1,0 +1,4 @@
+[submodule "libs/openwakeword-android-kt"]
+	path = libs/openwakeword-android-kt
+	url = https://github.com/iamsanjid/openwakeword-android-kt.git
+	branch = local-patches
