@@ -6,16 +6,23 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
+import android.os.Binder
 import android.os.Build
 import android.os.Handler
+import android.os.IBinder
 import android.os.Looper
-import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
 import com.hoqit.beea.MainActivity
+import com.hoqit.beea.R
 import com.hoqit.beea.model.ModelRepository
+import com.hoqit.beea.state.AssistantEvent
+import com.hoqit.beea.state.AssistantState
+import com.hoqit.beea.util.ServiceBinder
+import com.hoqit.beea.util.getAppInfo
+
 import com.rementia.openwakeword.lib.WakeWordEngine
 import com.rementia.openwakeword.lib.model.DetectionMode
 import kotlinx.coroutines.launch
@@ -24,12 +31,20 @@ class WakeWordService : LifecycleService() {
 
     private lateinit var notificationManager: NotificationManager
     private lateinit var wakeWordEngine: WakeWordEngine
-    private lateinit var powerManager: PowerManager
+
+    inner class LocalBinder : Binder(), ServiceBinder<WakeWordService> {
+        override fun getService(): WakeWordService = this@WakeWordService
+    }
+    private val binder = LocalBinder()
+
+    override fun onBind(intent: Intent): IBinder {
+        super.onBind(intent)
+        return binder
+    }
 
     override fun onCreate() {
         super.onCreate()
         notificationManager = getSystemService(NotificationManager::class.java)
-        powerManager = getSystemService(PowerManager::class.java)
         wakeWordEngine = WakeWordEngine(
             context = this,
             models = ModelRepository.getModels(),
@@ -45,107 +60,88 @@ class WakeWordService : LifecycleService() {
         return START_STICKY
     }
 
-    private fun onWakeWordDetected() {
-        //wakeScreenBriefly()
-        notificationManager.notify(
-            DETECTION_NOTIFICATION_ID,
-            buildDetectionAlert(createUIIntent())
-        )
+    fun pauseListening() {
+        wakeWordEngine.stop()
+        AssistantState.setListening(false)
+        notificationManager.notify(NOTIFICATION_ID, buildNotification(listening = false))
+    }
+
+    fun resumeListening() {
+        wakeWordEngine.start()
+        AssistantState.setListening(true)
+        notificationManager.notify(NOTIFICATION_ID, buildNotification(listening = true))
+    }
+
+    fun clearDetectionAlert() {
+        // wait 1 second to clear the notification out on the main loop
         Handler(Looper.getMainLooper()).postDelayed({
             notificationManager.cancel(DETECTION_NOTIFICATION_ID)
         }, 1000L)
-        // TODO: start listening for the follow-up command / STT session here
+    }
+
+    private fun onWakeWordDetected(modelName: String) {
+        notificationManager.cancel(DETECTION_NOTIFICATION_ID)
+        notificationManager.notify(
+            DETECTION_NOTIFICATION_ID,
+            buildDetectionAlert(createUIIntent(modelName))
+        )
+        lifecycleScope.launch {
+            AssistantState.emit(AssistantEvent.WakeWordDetected(modelName))
+        }
     }
 
     override fun onDestroy() {
         wakeWordEngine.stop()
+        AssistantState.setListening(false)
         super.onDestroy()
     }
 
-    /** Ongoing "listening" notification — low importance, stays silent, lives in status bar only. */
+    private fun createUIIntent(modelName: String): PendingIntent {
+        val intent = Intent(this, MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            putExtra("from_wake_detection", true)
+            putExtra("detected_model_name", modelName)
+        }
+        return PendingIntent.getActivity(
+            this, 0, intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+    }
+
     private fun buildNotification(listening: Boolean): Notification {
         return NotificationCompat.Builder(this, CHANNEL_ID_ONGOING)
-            .setContentTitle("Beea")
-            .setContentText(if (listening) "Listening for wake word" else "Idle")
+            .setContentTitle(getString(R.string.app_name))
+            .setContentText(if (listening) "Listening for wake word" else "Paused")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .build()
     }
 
-    /** One-shot high-priority alert — shows on lockscreen, pops as heads-up. */
     @SuppressLint("FullScreenIntentPolicy")
-    private fun buildDetectionAlert(wakeIntent: PendingIntent? = null): Notification {
+    private fun buildDetectionAlert(wakeIntent: PendingIntent): Notification {
         return NotificationCompat.Builder(this, CHANNEL_ID_ALERT)
-            .setContentTitle("Beea")
+            .setContentTitle(getString(R.string.app_name))
             .setContentText("Wake word detected!")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setCategory(NotificationCompat.CATEGORY_ALARM)
             .setFullScreenIntent(wakeIntent, true)
+            .setContentIntent(wakeIntent)
             .setAutoCancel(true)
             .build()
-    }
-
-    private fun createUIIntent(): PendingIntent {
-        val intent = Intent(this, MainActivity::class.java).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-        }
-
-        val pendingIntent = PendingIntent.getActivity(
-            this,
-            0,
-            intent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-
-        return pendingIntent
-    }
-
-    private fun wakeScreenBriefly() {
-//        val wakeLock = powerManager.newWakeLock(
-//            PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
-//            "Beea:WakeWordDetection"
-//        )
-//        wakeLock.acquire(3000L) // auto-releases after 3s, avoids leaking a held lock
-
-
-        // Crucial for Android 14+ background launch compatibility
-//        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
-//            val options = ActivityOptions.makeBasic().apply {
-//                setPendingIntentBackgroundActivityStartMode(
-//                    ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOW_ALWAYS
-//                )
-//            }
-//            startActivity(intent, options.toBundle())
-//        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-//            val options = ActivityOptions.makeBasic().apply {
-//                setPendingIntentBackgroundActivityStartMode(
-//                    ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
-//                )
-//            }
-//            startActivity(intent, options.toBundle())
-//        }  else {
-//            startActivity(intent)
-//        }
     }
 
     @SuppressLint("ObsoleteSdkInt")
     private fun createNotificationChannels() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val ongoing = NotificationChannel(
-                CHANNEL_ID_ONGOING,
-                "Wake word listening",
-                NotificationManager.IMPORTANCE_LOW
+                CHANNEL_ID_ONGOING, "Wake word listening", NotificationManager.IMPORTANCE_LOW
             )
             val alert = NotificationChannel(
-                CHANNEL_ID_ALERT,
-                "Wake word detected",
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-            }
+                CHANNEL_ID_ALERT, "Wake word detected", NotificationManager.IMPORTANCE_HIGH
+            ).apply { lockscreenVisibility = Notification.VISIBILITY_PUBLIC }
             notificationManager.createNotificationChannel(ongoing)
             notificationManager.createNotificationChannel(alert)
         }
@@ -153,11 +149,14 @@ class WakeWordService : LifecycleService() {
 
     private fun startWakeWordEngine() {
         wakeWordEngine.start()
+        AssistantState.setListening(true)
+
+        val appName = getAppInfo().name
 
         lifecycleScope.launch {
             wakeWordEngine.detections.collect { detection ->
-                Log.d("Beea-WakeWord-Service", "Detected: ${detection.model.name} (score: ${detection.score})")
-                onWakeWordDetected()
+                Log.d("${appName}-WakeWordService", "Detected: ${detection.model.name} (score: ${detection.score})")
+                onWakeWordDetected(detection.model.name)
             }
         }
     }
